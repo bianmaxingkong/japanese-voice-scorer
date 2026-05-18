@@ -1,0 +1,230 @@
+---
+name: canvas-japanese-reading-grading
+description: "Canvas日语朗读作业批改技能（教师模式）。学生提交音频（MP3/MP4/M4A/WAV）朗读日语文本，AI转写+按N5-N1水平分层评分+纠错+录入Canvas成绩+生成班级汇总。触发场景：批改日语朗读作业、日语发音评分、朗読練習テスト、课文朗读打分、日语课堂作业批改。"
+---
+
+# 日语朗读作业批改（教师模式）
+
+## 工作流程
+
+Step 1 → 下载学生提交音频
+Step 2 → Whisper medium 转写
+Step 3 → 按 N5-N1 水平评分 + 纠错
+Step 4 → 录入 Canvas 成绩
+Step 5 → 生成班级汇总 + 上传
+
+## Step 1：下载音频
+
+```bash
+python3 scripts/download_audio_submissions.py COURSE_ID ASSIGNMENT_ID
+```
+
+输出：`/tmp/canvas_audio_CID_AID/submission_map.json`
+
+## Step 2：Whisper 转写
+
+```bash
+# MP4 视频 -> 音频
+ffmpeg -y -i "input.mp4" -vn -acodec pcm_s16le -ar 16000 -ac 1 /tmp/audio.wav
+
+# 转写（固定 medium 模型）
+whisper /tmp/audio.wav --model medium --language ja --output_format txt
+```
+
+## Step 3：评分（详见 `references/workflow.md`）
+
+| 维度 | 权重 |
+|------|------|
+| 发音准确性 | 40% |
+| 语调与节奏 | 30% |
+| 流畅度 | 30% |
+
+等级：8.0+ 优秀 / 7.0+ 良好 / 6.0+ 中等 / <6.0 待加强
+
+**评分细节、扣分系数、纠错上限、输出模板** → 见 `references/workflow.md`
+
+## Step 4：录入 Canvas 成绩
+
+```bash
+python3 scripts/grade_submission.py COURSE_ID ASSIGNMENT_ID USER_ID GRADE --comment "评语内容"
+python3 scripts/grade_submission.py COURSE_ID ASSIGNMENT_ID USER_ID GRADE --comment-file comment.txt
+```
+
+## Step 5：生成汇总 + 上传
+
+```bash
+# 生成班级汇总文件
+python3 scripts/generate_class_summary.py COURSE_ID ASSIGNMENT_ID [--class-name NAME]
+
+# 上传汇总表到 Canvas 个人文件空间
+python3 scripts/send_summary_message.py [--xlsx PATH]
+```
+
+## 注意事项
+
+- 评分前确认作业为**手动发布分数**
+- 成绩录入用 `submission[posted_grade]`，不是 `grade`
+- Whisper 转写结果仅供参考
+- 纠错以鼓励为主，N5-N4 最多 2 项
+
+【workflow】
+# 日语朗读作业批改 - 详细流程与评分规则
+
+## 适用场景
+
+学生提交音频文件（MP3/MP4/M4A/WAV）朗读日语文本，教师需要：
+下载 → 转写 → 评分 → 纠错 → 录入成绩 → 生成班级汇总
+
+---
+
+## Step 1：下载学生提交文件
+
+```bash
+python3 scripts/download_audio_submissions.py COURSE_ID ASSIGNMENT_ID
+```
+
+流程：
+1. 读取 config.json 获取 API Token
+2. GET /courses/:id/assignments/:id/submissions?include[]=attachments,user
+3. 下载附件到 /tmp/canvas_audio_CID_AID/
+4. 生成 submission_map.json（学号/姓名/文件名/本地路径）
+
+---
+
+## Step 2：Whisper 音频转写
+
+| 文件格式 | 处理方式 |
+|----------|----------|
+| MP4（视频）| ffmpeg 转换为 WAV 再转写 |
+| MP3/M4A/WAV | 直接转写 |
+
+```bash
+ffmpeg -y -i "input.mp4" -vn -acodec pcm_s16le -ar 16000 -ac 1 /tmp/audio.wav
+whisper /tmp/audio.wav --model medium --language ja --output_format txt
+```
+
+---
+
+## Step 3：逐题评分
+
+### 评分维度（满分10分）
+
+| 维度 | 权重 | 评分要点 |
+|------|------|----------|
+| 发音准确性 | 40% | 假名、清浊音、长音、促音、拨音是否正确 |
+| 语调与节奏 | 30% | 句尾升降调基本合规，有基本起伏即可 |
+| 流畅度 | 30% | 整体基本连贯，允许1-2处轻微卡顿 |
+
+### 水平分层扣分系数
+
+| 错误类型 | N5 | N4 | N3 | N2 | N1 |
+|----------|----|----|----|----|----|
+| 促音错误（っ）| 0.3 | 0.5 | 0.7 | 0.9 | 1.0 |
+| 长音错误 | 0.3 | 0.5 | 0.7 | 1.0 | 1.0 |
+| 清浊混淆 | 0.2 | 0.3 | 0.5 | 0.7 | 0.9 |
+| 拨音错误（ん）| 0.2 | 0.3 | 0.5 | 0.9 | 1.0 |
+| 语调错误 | 0.1 | 0.2 | 0.3 | 0.5 | 0.7 |
+| 声调错误 | 0.1 | 0.2 | 0.4 | 0.6 | 0.8 |
+| 漏读/跳读 | 0.5 | 0.7 | 1.0 | 1.0 | 1.0 |
+| 多读/替换 | 0.5 | 0.7 | 1.0 | 1.0 | 1.0 |
+
+### 纠错数量上限
+
+| 水平 | 最多纠错项数 |
+|------|-------------|
+| N5~N4 | 2项（只纠正最严重错误，保护信心）|
+| N3 | 3项 |
+| N2 | 4项 |
+| N1 | 不限 |
+
+### 纠错优先级
+超过上限时按：1.影响语义 2.高频错误 3.语调错误 排序。
+
+### 同音词规则
+以假名读音为唯一判定依据。例：選択/洗濯（せんたく）、科学/化学（かがく）只核查假名读音。
+
+### 等级划分
+
+| 等级 | 分数区间 |
+|------|----------|
+| 优秀 | 8.0 ~ 10.0 |
+| 良好 | 7.0 ~ 7.9 |
+| 中等 | 6.0 ~ 6.9 |
+| 待加强 | < 6.0 |
+
+### 个人评分报告模板
+
+```
+学生姓名：{name}
+
+【评分结果】
+总分：{score}/10
+发音准确性：{pronunciation}/10
+语调与节奏：{intonation}/10
+流畅度：{fluency}/10
+
+【总体评价】
+{positive_comment}，{constructive_feedback}。{encouragement}
+
+【发音纠错】
+1. 原句：{original}
+   学生读法：{student_reading}
+   标准读法：{correct_reading}（{kana}）
+   错误类型：{error_type}
+
+【练习建议】
+- {suggestion_1}
+- {suggestion_2}
+```
+
+---
+
+## Step 4：录入 Canvas 成绩
+
+```bash
+python3 scripts/grade_submission.py COURSE_ID ASSIGNMENT_ID USER_ID GRADE --comment "评语内容"
+python3 scripts/grade_submission.py COURSE_ID ASSIGNMENT_ID USER_ID GRADE --comment-file comment.txt
+```
+
+API：
+```
+PUT /courses/:id/assignments/:id/submissions/:user_id
+submission[posted_grade]=8
+comment[text_comment]=综合评价内容
+comment[attempt]=1
+```
+
+---
+
+## Step 5：生成班级汇总
+
+```bash
+python3 scripts/generate_class_summary.py COURSE_ID ASSIGNMENT_ID [--class-name NAME]
+python3 scripts/send_summary_message.py [--xlsx PATH]
+```
+
+生成文件：
+- `{学生姓名}_评分报告.txt`
+- `班级{班级号}_成绩汇总表.txt`
+- `班级{班级号}_课堂讲评建议.txt`
+- `班级{班级号}_升档推荐名单.txt`
+
+---
+
+## Canvas API 速查
+
+| 用途 | 端点 | 参数 |
+|------|------|------|
+| 下载提交含附件 | GET /courses/:id/assignments/:id/submissions | include[]=attachments,user |
+| 评分+评语 | PUT /courses/:id/assignments/:id/submissions/:uid | submission[posted_grade], comment[text_comment] |
+| 上传个人文件 | POST /users/:id/files | name, size, content_type |
+
+---
+
+## 核心原则
+
+1. 鼓励为主，评分适度放宽
+2. 根据水平动态调整扣分力度
+3. 只纠正影响语义的明显发音错误
+4. 同一错误多次出现按1处扣分
+5. 微小识别误差不予扣分
